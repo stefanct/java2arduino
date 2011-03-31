@@ -1,0 +1,296 @@
+/** \file */
+//MAINPAGE
+/**
+\mainpage java2arduino (and back!)
+
+\section Introduction
+
+java2arduino is a communication application programming interface (API)
+that allows you to execute code on a microcontroller and also exchange arbitrary data with it
+via different means of communications (currently supported are serial links over Bluetooth (BT) and USB).
+
+It can be divided into two major parts: The client side can use the API to execute
+functions on the server side and to send and receive data from it. The server side implements the API
+on the microcontroller and allows to easily add user generated functions that can then be called by the client.
+
+The server part is written in C and is designed to be run on Atmel AVR microcontrollers,
+which are used among others by the <a href="http://www.arduino.cc">Arduino project</a>.
+This is also the origin of the namem but java2arduino is in no way limited to Arudino platforms.
+The client part is written in Java standard edition (earlier versions also supported Java mobile edition).
+
+The client part will be referred as \ref j2arduino and the server part on microcontrollers as \ref arduino2j.c "arduino2j".
+
+\subsection bluetooth Communicatingwith Java over Bluetooth 
+
+Since we decided to use Java on the client side, there was need to
+send data with Java over BT to the microcontroller. The BT chip used
+on the ArduinoBT board provides a convenient way in its default configuration
+to transfer data to and from the microcontroller as it is creating a kind of
+serial tunnel over BT. This tunnel is specified as Serial Port Profile (SPP) which relies on
+RFCOMM (Radio Frequency Communication).
+
+It turned out that there is a very elegant solution to make use of that in Java software,
+namely to utilize the API defined by Java Specification Request-82 (JSR-82).
+It provides methods to discover devices (and services they offer) as well as 
+interfaces to use some important services like RFCOMM or OBEX.
+Adhering this specification allows us to share code between the implementations for different
+devices as long as there exist support for JSR-82 on the underlying plattform.
+Fortunately JSR-82 has implementations on all interesting plattforms: There exists an FOSS implementation
+for PCs (Windows, MacOS, Linux), Windows Mobile named Bluecove and JSR-82 is standard in cellular phones
+that support Jave Mobile Edition.
+
+\subsection usb Communicating with Java over USB
+
+Although there exists JSR-80, which defines a Java API for accessing the Universal Serial Bus (USB),
+the situation is not as pleasing as with JSR-82. There exists no widely used cross-plattform implementation.
+There has been several attempts to implement JSR-80 on top of <a href="http://www.libusb.org/">libusb</a>,
+but none became very popular so far. There exists some commercial implementations but these were not evaluated.
+Beside missing implementations the API itself is quite badly designed (e.g. problems with multithreaded access),
+which have to be dealt with on a higher level. Nevertheless we were successful with one implementation of javax.usb
+based on libusb namely the one designed by <a href="http://github.com/trygvis/javax-usb-libusb1">Trygve Laugstøl</a>.
+It was extended were his implementation lacked needed features and this changes will hopefully be merged back sometime
+in the future. We followed JSR-80 firmly so there should be no problem using java2arduino with other javax.usb implementations.
+
+\subsection serial Communicating with Java over native serial ports
+
+For a long time there was a single wide-spread and hated FOSS library to communicate with native serial ports with Java:
+<a href="http://rxtx.qbang.org/">RXTX</a>. Because there were no FOSS alternatives back then java2arduino does not support serial connections yet.
+Currently a fork of RXTX named <a href="http://code.google.com/p/nrjavaserial/">nrjavaserial</a> is in development
+which may be used in a future implementation.
+
+\section java2arduino java2arduino - Bridging Java and Microcontrollers
+
+The most important classes are {@link j2arduino.ArduinoGateway ArduinoGateway} and {@link j2arduino.devices.Arduino Arduino},
+which offer the most basic services to the client classes.
+
+The gateway provides methods to query for Aruinos over different protocols with the help of so called \ref kinds.
+
+The gateway informs connections monitors, which implement
+{@link j2arduino.ArduinoActivityListener ArduinoActivityListener}. It calls the
+{@link j2arduino.ArduinoActivityListener#connectionStateChanged callback method} of all registered
+listeners whenever a connection state changes (connected, disconnected, active, inactive) or itself is looking for devices.
+This can be used for example for a GUI indicator.
+
+After selecting one of the {@link j2arduino.ArduinoGateway#getAvailableArduinos available} or
+{@link j2arduino.ArduinoGateway#addArduino predefined} Arduinos and 
+\ref arduinoConnection "connecting" to it, the client can send data in form of instances of {@link j2arduino.ArduinoPacket ArduinoPacket}.
+These are struct-like classes that holds the data to be transmitted as well as an 
+{@link j2arduino.ArduinoResponseListener ArduinoResponseListener} reference for callbacks.
+
+There are two ways to send such a packet: \link arduinoSync synchronously\endlink, which blocks
+the sender until the answer is received;
+and \link arduinoAsync asynchronously\endlink, which returns immediatly and uses the mentioned listener field
+to call that class back when the answer is picked up. Note that the caller and the callback method can be different
+in the asynchronous case. 
+ 
+All this is done in a threadsafe way so that multiple threads can communicate over java2arduino.
+
+\subsection dirty The Dirty Work
+The actual communication is done by an inner class of {@link j2arduino.devices.Arduino} (namely ArduinoWorker).
+After connecting it waits for new packets put into the queue by clients calling the send methods of {@link j2arduino.devices.Arduino Arduino}.
+After a packet is fetched from the queue, its fields are sent over the underlying connection according to a protocol
+specification obeyed by j2arduino and the counterpart on the microcontroller. The format of the transmitted packets
+is depicted \ref prot "below". After the request is sent the worker thread waits for the reply, fills its contents into
+an instance of ArduinoPacket (possibly the same as the request) and notifies the Arduino class of the finished reception
+(or in the case of asynchronous sending it contacts the client directly). In the case of an error the inquirer is informed in the same way
+and - if the problem is too severe - the connection is possibly closed, all pending requests are removed from the queue and their clients informed.
+
+\anchor prot
+\f{rm}
+\centering
+\newcommand{\byteheader}[1]{\bitbox[]{3}{$#1$}}
+\begin{bytefield}{10}
+	\byteheader{1} \bitbox{8}{Start of Frame}\\
+	\byteheader{2} \bitbox{8}{Sequence\#} \\
+	\byteheader{3} \bitbox{8}{\relsize{-1}Command/Reply} \\
+	\byteheader{4} \bitbox{8}{Length} \\
+	\byteheader{5} \bitbox[tlr]{8}{$\vdots$ } \byteheader{1}\\
+	\byteheader{\vdots\vspace{4bp}} \bitbox[lr]{8}{\vspace{3bp} Payload} \byteheader{\vdots\vspace{4bp}}\\
+	\byteheader{n-1} \bitbox[blr]{8}{$\vdots$\\\vspace{8bp}} \bitbox[]{10}{$m$ (Up to 255B)}\\
+	\byteheader{n} \bitbox{8}{Checksum} \\
+\end{bytefield}\vspace{-2em} \legend{Figure: Format of ArduinoPackets}
+\f}
+
+-# The first byte just indicates that a new frame begins (see the {@link j2aframing declaration}).
+-# The second field contains a sequence number allowing us to relate requests to their replies:
+By definition %j2arduino is free to send any sequence numbers; arduino2j has to reply with the identifier it received respectively.
+-# The next field has different meanings depending if the packet is sent by %j2arduino or arduino2j.
+In the request it is set to the command specified by the {@link j2arduino.ArduinoPacket#cmd cmd field} of the %ArduinoPacket used in the send method.
+If it is sent back by the microcontroller it contains the return value of the afore called java2arduino method or
+an {@link j2aerrors error code} of arduino2j if there was a problem.
+-# Next is the length value that indicates how many bytes will follow as payload in the next field.
+-# The payload field can be 0–255 Bytes long. The encoding is not explicitly specified, 
+but the Java and microcontroller application have to agree on it, using little-endian is {@link packethelpers encouraged} though.
+-# The last byte contains a \subpage crc "checksum". Although the underlying protocol SPP tries to guarantees transmissions,
+ having another control instance mitigates bugs of the java2arduino implementations (which of course don't exist in this one).
+ Also it helps with synchronization since the microcontroller does not get notified of new connections or aborts from the BT chip
+ (in its default configuration) on the ArduinoBT and similar systems.
+
+To be able to synchronize on packets transmitted in a stream of bytes over a serial stream of bytes java2arduino uses the "start of frame" field.
+To make this scheme more robust we use \subpage framing "byte stuffing".
+
+\subsubsection dirtyarduino The server part - arduino2j
+
+As mentioned in der introduction the ultimate goal of java2arduino is to make it easy to communicate with user generated functions on the microcontroller.
+This section will briefly explain how the packets described above will be used by arduino2j to accomplish that.
+
+The function #a2jProcess is responsible for scheduling the execution of user methods according to packets it receives.
+At compile time a jump table with function pointers to all java2arduino functions is stored in the flash memory of the micocontroller.
+When a2jProcess reads a valid packet from the underlying connection, it reads out the function pointer according to the command field of the received packet
+and calls the method at the pointer's address. All java2arduino methods have to be of the type #CMD_P or #CMD_P_MANY.
+The first type is useful for applications that do not need to exchange more than 255B.
+They are directly called with a pointer to the payload of the requesting packet (and its length) as parameter.
+Data can easily be sent back by just storing it in the array referenced by the payload parameter.
+It is then automatically transmitted by a2jProcess after the method returns.
+The other type is used in the case where more data needs to be transmitted, which is accomplished
+by dividing the input into many packets and sending them over together with an offset similar to IP fragmentation.
+See \ref j2amany for details.
+
+\subsection addfeat Additional features
+<ul>
+<li> \b Function mapping
+
+Because the methods to be executed on behalf of the client are transmitted encoded as integer offsets in the jump table,
+there has to be a mapping between method names and the corresponding offsets.
+This mapping is stored aside the function pointers in the jump table with the help of some \ref jtmacros "macros".
+
+When j2arduino connects it fetches the mapping with the help of {@link j2arduino.ArduinoFunctionMapping ArduinoFunctionMapping}
+which calls {@link #a2jGetMapping} on the microcontroller.
+This allows clients to {@link j2arduino.devices.Arduino#sendSyncByName call} methods just by their name.
+
+<li> \b Properties
+It may be convenient to store individual properties (e.g. characteristics of connected modules) on the devices
+and be able to read them out from Java. {@link j2arduino.ArduinoProperties ArduinoProperties} provide exactly this functionality:
+This class makes key-value-pairs stored in the flash available to clients. They are fetched via #a2jGetProperties when connecting.
+</ul>
+
+*/
+
+// kinds
+/**
+\page kinds Arduino Kinds
+
+Currently there are two different {@link j2arduino.devices.ArduinoKind kinds} implemented:
+{@link j2arduino.devices.ArduinoUSBKind USB} using the Universal Serial Bus and
+{@link j2arduino.devices.ArduinoBTKind BT} using Bluetooth.
+You can select the kinds to be used by different means (listed in decreasing priority):
+\li Environment variable \em J2ARDUINO_KINDS,
+\li System variable \em j2arduino.kinds,
+\li Property \em j2arduino.kinds in a ".properties" file.
+\li The default is none (which is not really useful).
+
+The value in all cases should have the names of the types written as in the class names seperated by commas e.g. "J2ARDUINO_KINDS=BT,USB".
+
+You can also specify the name of the ".properties" file in a similar way:
+\li Environment variable \em J2ARDUINO_PROPERTIES,
+\li System variable \em j2arduino.properties.
+\li The default is \em j2arduino.properties.
+
+*/
+
+// CRC
+/**
+\page crc Checksumming
+
+The checksum generation is done by XORing all bytes (but the constant start of frame field) of a packet together
+(some after a constant summand is added) and appending it as the last byte.
+The receiver can calculate the checksum while the data is read in and can compare it at the end of reception.
+
+\note Calculation is performed before/after \subpage framing "byte stuffing" is done when sending/receiving respectively.
+
+Here is a sample calculation in C:
+\code
+	unsigned char csum = (unsigned char)(seq ^ (cmd + 11) ^ (len + 97));
+	for(int i = 0; i < len; i++){
+		csum ^= readByte();
+	}
+\endcode
+\c seq is the sequence number, \c cmd is the command byte and \c len the length of the payload.
+The {@link j2acrc constants} 11 (1011<small><sub>b</sub></small>) and 97 (1100001<small><sub>b</sub></small>)
+were chosen because they are primes and differ in most places (not \em that important, but we had to choose some).
+The main reason why the constants are included at all, is that the checksum for the most trivial packet (all zeros) is not 0.
+*/
+
+// FRAMING
+/**
+\page framing Framing
+
+Since the A2J_SOF byte should indicate the start of a packet, it should not appear somewhere in the data stream arbitrarily.
+Whenever a byte value equal to A2J_SOF is to be sent the protcol demands that it is escaped with A2J_ESC and then 
+sent with its original value decremented by one. The receiver will notice the escape character A2J_ESC and will deliver the following byte incremented by one.
+If the escape character itself is to be transmitted as payload, it has to be escaped in the same way.
+
+An example will clarify possible dubiety. Let #A2J_SOF be \c 0x12 and the escape character #A2J_ESC be \c 0x7D.
+\f{rm}
+\settowidth{\bitwidth}{\bf 0xDD~}
+\noindent
+\begin{bytefield}{8} \bitheader{0-8}\\ \bitbox{1}{0x01} \bitbox{1}{0x02} \bitbox{1}{0x11} \bitbox{1}{0x12} \bitbox{1}{0x12} \bitbox{1}{0x13} \bitbox{1}{0x7D} \bitbox{1}{0x00} \bitbox{1}{0xFF} \end{bytefield}\\
+Data to send\\\\\\
+\begin{bytefield}{8} \bitheader{0-11}\\ \bitbox{1}{0x01} \bitbox{1}{0x02} \bitbox{1}{0x11} \bitbox{1}{\bf 0x7D} \bitbox{1}{\it 0x11} \bitbox{1}{\bf 0x7D} \bitbox{1}{\it 0x11} \bitbox{1}{0x13} \bitbox{1}{\bf 0x7D} \bitbox{1}{\em 0x7C} \bitbox{1}{0x00} \bitbox{1}{0xff} \end{bytefield}\\
+Data transmitted
+\f}
+The newly inserted escape characters are \b bold, the escaped and therefore decremented characters are in \em italics.
+*/
+
+/**@addtogroup j2amany Oversize data
+Summary of various source elements related to transferring bigger amounts of data than with the usual send methods.
+\anchor j2amanydetails Due to resource constraints on the microcontroller only small chunks can be processed at any one time.
+With the help of #a2jMany these can be combined to form a bigger continuous chunk (e.g. a file written to a SD-Card).
+
+To take advantage of that custom methods on the microcontroller have to match #CMD_P_MANY.
+\ref manyoffsets "Below" the different parameters of CMP_P_MANY methods are depicted in relation to the big chunk.
+The \a offsetp pointer points at a 32b unsigned integer that indicates the distance (in bytes) between the start of the big chunk and the
+first byte of the current small chunk which in turn is referenced by \a datap. The length of the current small chunk is given by \a *lenp.
+All chunks are guaranteed to be transmitted sequentially and without overlap.
+
+\anchor manyoffsets
+\f{rm}
+\begin{bytefield}{16}
+\wordgroupl{\tt *offsetp}
+\wordbox[trl]{2}{Already received part of the chunk}\\
+\skippedwords \\
+\wordbox[blr]{1}{}
+\endwordgroupl \\
+\wordgroupl{\tt *lenp}
+\wordbox{3}{\tt *datap}
+\endwordgroupl \\
+\wordbox[trl]{1}{Not yet received} \\
+\skippedwords \\
+\wordbox[blr]{1}{}
+\end{bytefield}\legend{Figure: Parameters of CMD\_P\_MANY}
+\f}
+
+On the client side {@link j2arduino.devices.Arduino#sendLongByName} splits big payloads automatically and sends them to CMP_P_MANY compatible methods.
+It also reassembles the small chunks it gets as replies and returns them as one big array (inside an ArduinoPacket).
+
+\section Implementation
+All oversize data methods are built upon the normal send/receive functions, that are only able to transmit up to 255B at once.
+In the split packets used to transmit more an additional header is inserted that is read by #a2jMany which contains the arguments
+defined by #CMD_P_MANY and the offset of the actual CMD_P_MANY-compatible user-defined method
+(the \ref prot "command field" is already used to "call" a2jMany).
+
+\anchor manyheader
+\f{rm}
+\centering
+\newcommand{\byteheader}[1]{\bitbox[]{3}{$#1$}}
+\begin{bytefield}{19}
+\wordgroupl{Normal java2arduino\\packet's \bf payload}
+\bitbox{16}{{\tt CMD\_P\_MANY} index} \byteheader{0} \\
+\bitbox{16}{isLast} \byteheader{1} \\
+\bitbox[trl]{16}{offset} \byteheader{2} \\
+\bitbox[rl]{16}{} \byteheader{3} \\
+\bitbox[rl]{16}{} \byteheader{4} \\
+\bitbox[brl]{16}{} \byteheader{5} \\
+\bitbox[trl]{16}{\vdots} \byteheader{6} \\
+\bitbox[rl]{16}{Small chunk}\\
+\bitbox[rl]{16}{(pointed at by \tt datap)}\\
+\bitbox[brl]{16}{\vdots \vspace{8bp}}
+\endwordgroupl \\
+\end{bytefield}\vspace{-1.5em} \legend{Figure: Location and layout of a2jMany headers}
+\f}
+
+
+All parameters are declared as pointers so that the callees can also assign new values for two-way communication
+(just as it is done in the #CMD_P type).
+To indicate that the big chunk is complete \a *isLastp is set to true in the last small chunk to be transferred.
+*/
