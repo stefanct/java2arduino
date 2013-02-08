@@ -11,7 +11,7 @@ on the microcontroller and allows to easily add user generated functions that ca
 
 The server part is written in C and is designed to be run on Atmel AVR microcontrollers,
 which are used among others by the <a href="http://www.arduino.cc">Arduino project</a>.
-This is also the origin of the namem but java2arduino is in no way limited to Arudino platforms.
+This is also the origin of the name but java2arduino is in no way limited to Arudino platforms.
 The client part is written in Java standard edition (earlier versions also supported Java mobile edition).
 
 For more information please run `make` in the `doc` folder to generate the full documentation with Doxygen.
