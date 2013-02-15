@@ -4,3 +4,6 @@
 [submodule "java"]
 	path = java
 	url = git@github.com:stefanct/java2arduino-java.git
+[submodule "c"]
+	path = c
+	url = git@github.com:stefanct/java2arduino-c.git
